@@ -41,7 +41,12 @@ namespace Carbon.Plugins
                 _sense = GetComponent<SenseComponent>();
                 NavAgent = GetComponent<LimitedTurnNavAgent>();
                 Entity = GetComponent<BaseCombatEntity>();
-                if (Entity != null) EntityId = Entity.net.ID;
+                if (Entity != null)
+                {
+                    EntityId = Entity.net.ID;
+                    Entity._scale = 0.5f;
+                    Entity.SendNetworkUpdate();
+                }
             }
 
             private void Update()
@@ -169,6 +174,12 @@ namespace Carbon.Plugins
 
             private void OnDestroy()
             {
+                if (Entity != null && !Entity.IsDestroyed)
+                {
+                    Entity._scale = 1.0f;
+                    Entity.SendNetworkUpdate();
+                }
+
                 if (PetWolf.Instance != null && PetWolf.Instance._activePets != null)
                 {
                     PetWolf.Instance._activePets.Remove(EntityId);
