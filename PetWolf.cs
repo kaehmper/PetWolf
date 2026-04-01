@@ -44,7 +44,7 @@ namespace Carbon.Plugins
                 if (Entity != null)
                 {
                     EntityId = Entity.net.ID;
-                    Entity._scale = 0.5f;
+                    if (_scaleField != null) _scaleField.SetValue(Entity, 0.5f);
                     Entity.SendNetworkUpdate();
                 }
             }
@@ -176,7 +176,7 @@ namespace Carbon.Plugins
             {
                 if (Entity != null && !Entity.IsDestroyed)
                 {
-                    Entity._scale = 1.0f;
+                    if (_scaleField != null) _scaleField.SetValue(Entity, 1.0f);
                     Entity.SendNetworkUpdate();
                 }
 
@@ -192,6 +192,7 @@ namespace Carbon.Plugins
 
         private Harmony _harmony;
         private static FieldInfo _animLoopDurationField;
+        private static FieldInfo _scaleField;
 
         private void Init()
         {
@@ -200,6 +201,7 @@ namespace Carbon.Plugins
 
             // Cache the private 'duration' field of the native sleep state so we can manipulate it infinitely
             _animLoopDurationField = typeof(State_PlayAnimLoop).GetField("duration", BindingFlags.NonPublic | BindingFlags.Instance);
+            _scaleField = typeof(BaseEntity).GetField("_scale", BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
 
             _harmony = new Harmony("com.yourname.petwolves");
             _harmony.PatchAll();
