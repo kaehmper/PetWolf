@@ -11,7 +11,7 @@ namespace Carbon.Plugins
     [Description("Allows players to tame and command Gen2 AI Wolves (Follow, Stay, Sleep, Attack, Intimidated).")]
     public class PetWolf : CarbonPlugin
     {
-        public enum PetCommand { Follow, Stay, Sleep, Attack, Intimidated }
+        public enum PetCommand { Follow, Stay, Sleep, Attack, Intimidated, Lead }
 
         public class PetController : MonoBehaviour
         {
@@ -24,6 +24,7 @@ namespace Carbon.Plugins
             
             public State_Follow FollowState;
             public State_Stay StayState;
+            public State_Lead LeadState;
 
             private float _attackDuration = 10f;
             private float _attackStartedAt;
@@ -72,6 +73,10 @@ namespace Carbon.Plugins
 
                     case PetCommand.Stay:
                         if (_fsm.CurrentState != StayState) _fsm.SetState(StayState);
+                        break;
+
+                    case PetCommand.Lead:
+                        if (_fsm.CurrentState != LeadState) _fsm.SetState(LeadState);
                         break;
 
                     case PetCommand.Sleep:
@@ -281,6 +286,7 @@ namespace Carbon.Plugins
                     controller.Owner = player;
                     controller.FollowState = new State_Follow(target, controller.NavAgent);
                     controller.StayState = new State_Stay(controller.NavAgent);
+                    controller.LeadState = new State_Lead(target, controller.NavAgent);
 
                     _activePets[target.net.ID] = controller;
                     target.GetComponent<BlackboardComponent>()?.Clear();
@@ -369,6 +375,18 @@ namespace Carbon.Plugins
             else player.ChatMessage("You don't have any pet wolves.");
         }
 
+        [ChatCommand("lead")]
+        private void LeadCommand(BasePlayer player, string command, string[] args)
+        {
+            var pets = GetPlayerPets(player);
+            if (pets.Count > 0)
+            {
+                foreach (var pet in pets) pet.Command = PetCommand.Lead;
+                player.ChatMessage($"Commanded {pets.Count} wolf(s) to lead.");
+            }
+            else player.ChatMessage("You don't have any pet wolves.");
+        }
+
         #endregion
 
         #region Custom AI States
@@ -432,6 +450,49 @@ namespace Carbon.Plugins
                 {
                     _navAgent.ResetPath();
                 }
+                return EFSMStateStatus.None;
+            }
+        }
+
+        public class State_Lead : FSMStateBase
+        {
+            private BaseEntity _entity;
+            private LimitedTurnNavAgent _navAgent;
+
+            public float StopDistance = 2f;
+            public float AheadDistance = 5f;
+
+            public State_Lead(BaseEntity entity, LimitedTurnNavAgent navAgent)
+            {
+                Name = "Lead Owner";
+                _entity = entity;
+                _navAgent = navAgent;
+            }
+
+            public override EFSMStateStatus OnStateUpdate(float deltaTime)
+            {
+                if (_navAgent == null || _entity == null) return EFSMStateStatus.None;
+
+                if (!_entity.TryGetComponent<PetController>(out var controller) || controller.Owner == null || controller.Owner.IsDead())
+                {
+                    return EFSMStateStatus.Failure;
+                }
+
+                Vector3 forward = controller.Owner.eyes.HeadRay().direction;
+                forward.y = 0;
+                Vector3 targetPos = controller.Owner.transform.position + (forward.normalized * AheadDistance);
+                float distance = Vector3.Distance(_entity.transform.position, targetPos);
+
+                if (distance > StopDistance)
+                {
+                    _navAgent.SetDestination(targetPos, true);
+                    _navAgent.SetSpeed(LimitedTurnNavAgent.Speeds.Run);
+                }
+                else
+                {
+                    if (_navAgent.IsFollowingPath) _navAgent.ResetPath();
+                }
+
                 return EFSMStateStatus.None;
             }
         }
@@ -540,6 +601,7 @@ namespace Carbon.Plugins
                     if (controller.Command == PetCommand.Attack) return true;
 
                     if (nextState == controller.FollowState || nextState == controller.StayState ||
+                        nextState == controller.LeadState ||
                         nextState == __instance.sleep || nextState == __instance.intimidated)
                         return true;
 
