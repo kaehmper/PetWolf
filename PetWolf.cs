@@ -8,10 +8,10 @@ using Oxide.Core.Libraries.Covalence;
 namespace Carbon.Plugins
 {
     [Info("PetWolf", "YourName", "1.6.6")]
-    [Description("Allows players to tame and command Gen2 AI Wolves (Follow, Stay, Sleep, Attack, Intimidated).")]
+    [Description("Allows players to tame and command Gen2 AI Wolves (Follow, Stay, Sleep, Attack, Lead).")]
     public class PetWolf : CarbonPlugin
     {
-        public enum PetCommand { Follow, Stay, Sleep, Attack, Intimidated, Lead }
+        public enum PetCommand { Follow, Stay, Sleep, Attack, Lead }
 
         public class PetController : MonoBehaviour
         {
@@ -107,19 +107,6 @@ namespace Carbon.Plugins
                         {
                             Entity.Heal(5f);
                             _lastSleepHealAt = Time.time;
-                        }
-                        break;
-
-                    case PetCommand.Intimidated:
-                        if (_fsm.CurrentState != _fsm.intimidated)
-                        {
-                            _fsm.SetState(_fsm.intimidated);
-                        }
-
-                        // Wipe path so it doesn't slide while cowering
-                        if (NavAgent != null && NavAgent.IsFollowingPath)
-                        {
-                            NavAgent.ResetPath();
                         }
                         break;
 
@@ -348,21 +335,6 @@ namespace Carbon.Plugins
                     pet.SetSleep();
                 }
                 player.ChatMessage($"Commanded {pets.Count} wolf(s) to sleep.");
-            }
-            else player.ChatMessage("You don't have any pet wolves.");
-        }
-
-        [ChatCommand("intimidated")]
-        private void IntimidatedCommand(BasePlayer player, string command, string[] args)
-        {
-            var pets = GetPlayerPets(player);
-            if (pets.Count > 0)
-            {
-                foreach (var pet in pets)
-                {
-                    pet.Command = PetCommand.Intimidated;
-                }
-                player.ChatMessage($"Commanded {pets.Count} wolf(s) to act intimidated.");
             }
             else player.ChatMessage("You don't have any pet wolves.");
         }
@@ -615,7 +587,7 @@ namespace Carbon.Plugins
 
                     if (nextState == controller.FollowState || nextState == controller.StayState ||
                         nextState == controller.LeadState ||
-                        nextState == __instance.sleep || nextState == __instance.intimidated)
+                        nextState == __instance.sleep)
                         return true;
 
                     return false;
