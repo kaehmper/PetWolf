@@ -1,11 +1,4 @@
-# agents.md — Carbon Plugin Agent für Rust
-
-> Diese Datei steuert das Verhalten von Jules (jules.google.com) bei der Entwicklung von
-> C#-Carbon-Plugins für den Rust-Dedicated-Server. Jules liest diese Datei zu Beginn
-> jeder Aufgabe und hält sich strikt an alle hier definierten Regeln, Konventionen und
-> Arbeitsabläufe.
-
----
+# agents.md — Carbon Plugin für Rust
 
 ## 1. Rolle und Ziel
 
