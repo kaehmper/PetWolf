@@ -5,17 +5,18 @@ using Rust.Ai.Gen2;
 using UnityEngine;
 using Oxide.Core.Libraries.Covalence;
 
-namespace Oxide.Plugins 
+namespace Carbon.Plugins
 {
     [Info("PetWolf", "YourName", "1.6.6")]
-    [Description("Allows players to tame and command Gen2 AI Wolves (Follow, Stay, Sleep, Attack, Intimidated).")]
-    public class PetWolf : RustPlugin
+    [Description("Allows players to tame and command Gen2 AI Wolves (Follow, Stay, Sleep, Attack, Lead).")]
+    public class PetWolf : CarbonPlugin
     {
-        public enum PetCommand { Follow, Stay, Sleep, Attack, Intimidated }
+        public enum PetCommand { Follow, Stay, Sleep, Attack, Lead }
 
-        public class PetData
+        public class PetController : MonoBehaviour
         {
             public BaseCombatEntity Entity;
+            public NetworkableId EntityId;
             public BasePlayer Owner;
             public LimitedTurnNavAgent NavAgent;
             public PetCommand Command = PetCommand.Follow;
@@ -23,144 +24,217 @@ namespace Oxide.Plugins
             
             public State_Follow FollowState;
             public State_Stay StayState;
+            public State_Lead LeadState;
 
-            public Timer ActionTimer;
-            public Timer SleepHealTimer;
+            private float _attackDuration = 10f;
+            private float _attackStartedAt;
 
-            public void Cleanup()
+            private float _sleepHealInterval = 1800f;
+            private float _lastSleepHealAt;
+
+            private Wolf2FSM _fsm;
+            private SenseComponent _sense;
+
+            private void Awake()
             {
-                ActionTimer?.Destroy();
-                SleepHealTimer?.Destroy();
-            }
-        }
-
-        public static Dictionary<NetworkableId, PetData> ActivePets = new Dictionary<NetworkableId, PetData>();
-        
-        private Timer _passiveEnforcerTimer;
-        private Harmony _harmony;
-        private static FieldInfo _animLoopDurationField;
-
-        private void Init()
-        {
-            // Cache the private 'duration' field of the native sleep state so we can manipulate it infinitely
-            _animLoopDurationField = typeof(State_PlayAnimLoop).GetField("duration", BindingFlags.NonPublic | BindingFlags.Instance);
-
-            _harmony = new Harmony("com.yourname.petwolves");
-            _harmony.PatchAll();
-        }
-
-        private void Loaded()
-        {
-            _passiveEnforcerTimer = timer.Every(1f, EnforceDictatorState);
-        }
-
-        private void Unload()
-        {
-            _passiveEnforcerTimer?.Destroy();
-            foreach (var pet in ActivePets.Values) pet.Cleanup();
-            ActivePets.Clear();
-            _harmony?.UnpatchAll("com.yourname.petwolves");
-        }
-
-        // The Enforcer Loop: Guarantees the wolf is doing EXACTLY what its Command dictates.
-        private void EnforceDictatorState()
-        {
-            List<NetworkableId> keysToRemove = new List<NetworkableId>();
-
-            foreach (var kvp in ActivePets)
-            {
-                var pet = kvp.Value;
-                var wolf = pet.Entity;
-
-                if (wolf == null || wolf.IsDestroyed || wolf.IsDead() || pet.Owner == null || pet.Owner.IsDead())
+                _fsm = GetComponent<Wolf2FSM>();
+                _sense = GetComponent<SenseComponent>();
+                NavAgent = GetComponent<LimitedTurnNavAgent>();
+                Entity = GetComponent<BaseCombatEntity>();
+                if (Entity != null)
                 {
-                    pet.Cleanup();
-                    keysToRemove.Add(kvp.Key);
-                    continue;
+                    EntityId = Entity.net.ID;
+                    if (_scaleField != null) _scaleField.SetValue(Entity, 0.5f);
+                    Entity.SendNetworkUpdate();
+                }
+            }
+
+            private void Update()
+            {
+                if (Entity == null || Entity.IsDestroyed || Entity.IsDead() || Owner == null || Owner.IsDead())
+                {
+                    Destroy(this);
+                    return;
                 }
 
-                var senseComp = wolf.GetComponent<SenseComponent>();
-                var fsm = wolf.GetComponent<Wolf2FSM>();
-                if (fsm == null) continue;
+                if (_fsm == null) return;
 
                 // Deafen and blind the AI unless it's explicitly allowed to attack
-                if (pet.Command != PetCommand.Attack)
+                if (Command != PetCommand.Attack)
                 {
-                    if (senseComp != null && senseComp.Target != null)
+                    if (_sense != null && _sense.Target != null)
                     {
-                        senseComp.ClearTarget(true);
-                        senseComp.ForgetAllNoises();
+                        _sense.ClearTarget(true);
+                        _sense.ForgetAllNoises();
                     }
                 }
 
                 // Force FSM States based on Command
-                switch (pet.Command)
+                switch (Command)
                 {
                     case PetCommand.Follow:
-                        if (fsm.CurrentState != pet.FollowState) fsm.SetState(pet.FollowState);
+                        if (_fsm.CurrentState != FollowState) _fsm.SetState(FollowState);
                         break;
 
                     case PetCommand.Stay:
-                        if (fsm.CurrentState != pet.StayState) fsm.SetState(pet.StayState);
+                        if (_fsm.CurrentState != StayState) _fsm.SetState(StayState);
+                        break;
+
+                    case PetCommand.Lead:
+                        if (_fsm.CurrentState != LeadState) _fsm.SetState(LeadState);
                         break;
 
                     case PetCommand.Sleep:
-                        if (fsm.CurrentState != fsm.sleep) 
+                        if (_fsm.CurrentState != _fsm.sleep)
                         {
-                            fsm.SetState(fsm.sleep);
+                            _fsm.SetState(_fsm.sleep);
                         }
                         
                         // Manipulate the native timer to force infinite sleep so it never wakes up on its own
-                        if (_animLoopDurationField != null && fsm.CurrentState == fsm.sleep)
+                        if (_animLoopDurationField != null && _fsm.CurrentState == _fsm.sleep)
                         {
-                            _animLoopDurationField.SetValue(fsm.sleep, 9999f); 
+                            _animLoopDurationField.SetValue(_fsm.sleep, 9999f);
                         }
 
                         // Forcefully wipe the path so the wolf doesn't slide across the floor while sleeping
-                        if (pet.NavAgent != null && pet.NavAgent.IsFollowingPath)
+                        if (NavAgent != null && NavAgent.IsFollowingPath)
                         {
-                            pet.NavAgent.ResetPath();
-                        }
-                        break;
-
-                    case PetCommand.Intimidated:
-                        if (fsm.CurrentState != fsm.intimidated)
-                        {
-                            fsm.SetState(fsm.intimidated);
+                            NavAgent.ResetPath();
                         }
 
-                        // Wipe path so it doesn't slide while cowering
-                        if (pet.NavAgent != null && pet.NavAgent.IsFollowingPath)
+                        // Handle Sleep Healing
+                        if (Time.time - _lastSleepHealAt >= _sleepHealInterval)
                         {
-                            pet.NavAgent.ResetPath();
+                            Entity.Heal(5f);
+                            _lastSleepHealAt = Time.time;
                         }
                         break;
 
                     case PetCommand.Attack:
-                        if (pet.AttackTarget == null || pet.AttackTarget.IsDead())
+                        if (AttackTarget == null || AttackTarget.IsDead())
                         {
-                            pet.Command = PetCommand.Follow;
-                            fsm.SetState(pet.FollowState);
+                            Command = PetCommand.Follow;
+                            _fsm.SetState(FollowState);
                         }
                         else
                         {
-                            bool isPeaceful = fsm.CurrentState == pet.FollowState || 
-                                              fsm.CurrentState == pet.StayState || 
-                                              fsm.CurrentState == fsm.sleep ||
-                                              fsm.CurrentState == fsm.intimidated ||
-                                              fsm.CurrentState == fsm.roam ||
-                                              fsm.CurrentState == fsm.randomIdle;
+                            // Handle Attack Timeout
+                            if (Time.time - _attackStartedAt >= _attackDuration)
+                            {
+                                Command = PetCommand.Follow;
+                                AttackTarget = null;
+                                if (Owner != null && Owner.IsConnected)
+                                    Owner.ChatMessage("Your wolf has finished its attack and is returning.");
+
+                                _fsm.SetState(FollowState);
+                                break;
+                            }
+
+                            bool isPeaceful = _fsm.CurrentState == FollowState ||
+                                              _fsm.CurrentState == StayState ||
+                                              _fsm.CurrentState == _fsm.sleep ||
+                                              _fsm.CurrentState == _fsm.intimidated ||
+                                              _fsm.CurrentState == _fsm.roam ||
+                                              _fsm.CurrentState == _fsm.randomIdle;
                             
                             if (isPeaceful)
                             {
-                                fsm.SetState(fsm.charge);
+                                _fsm.SetState(_fsm.charge);
                             }
                         }
                         break;
                 }
             }
 
-            foreach (var key in keysToRemove) ActivePets.Remove(key);
+            public void SetAttackTarget(BaseCombatEntity target)
+            {
+                AttackTarget = target;
+                Command = PetCommand.Attack;
+                _attackStartedAt = Time.time;
+            }
+
+            public void SetSleep()
+            {
+                Command = PetCommand.Sleep;
+                _lastSleepHealAt = Time.time;
+            }
+
+            private void OnDestroy()
+            {
+                if (Entity != null && !Entity.IsDestroyed)
+                {
+                    if (_scaleField != null) _scaleField.SetValue(Entity, 1.0f);
+                    Entity.SendNetworkUpdate();
+                }
+
+                if (PetWolf.Instance != null && PetWolf.Instance._activePets != null)
+                {
+                    PetWolf.Instance._activePets.Remove(EntityId);
+                }
+            }
+        }
+
+        public static PetWolf Instance;
+        public Dictionary<NetworkableId, PetController> _activePets = new Dictionary<NetworkableId, PetController>();
+
+        private Harmony _harmony;
+        private static FieldInfo _animLoopDurationField;
+        private static FieldInfo _scaleField;
+
+        private void Init()
+        {
+            Instance = this;
+            permission.RegisterPermission("petwolf.tame", this);
+
+            // Cache the private 'duration' field of the native sleep state so we can manipulate it infinitely
+            _animLoopDurationField = typeof(State_PlayAnimLoop).GetField("duration", BindingFlags.NonPublic | BindingFlags.Instance);
+            _scaleField = typeof(BaseEntity).GetField("_scale", BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
+
+            _harmony = new Harmony("com.yourname.petwolves");
+            _harmony.PatchAll();
+        }
+
+        private void Unload()
+        {
+            CleanupAllPets();
+            _harmony?.UnpatchAll("com.yourname.petwolves");
+            Instance = null;
+        }
+
+        private void OnServerShutdown()
+        {
+            CleanupAllPets();
+        }
+
+        private void OnPlayerDisconnected(BasePlayer player)
+        {
+            if (player == null) return;
+
+            var pets = GetPlayerPets(player);
+            foreach (var pet in pets)
+            {
+                if (pet != null) UnityEngine.Object.Destroy(pet);
+            }
+        }
+
+        private void OnEntityKill(BaseCombatEntity entity)
+        {
+            if (entity != null && entity.TryGetComponent<PetController>(out var controller))
+            {
+                UnityEngine.Object.Destroy(controller);
+            }
+        }
+
+        private void CleanupAllPets()
+        {
+            if (_activePets == null) return;
+
+            var controllers = new List<PetController>(_activePets.Values);
+            foreach (var controller in controllers)
+            {
+                if (controller != null) UnityEngine.Object.Destroy(controller);
+            }
+            _activePets.Clear();
         }
 
         #region Helper Methods
@@ -174,10 +248,10 @@ namespace Oxide.Plugins
             return null;
         }
 
-        private List<PetData> GetPlayerPets(BasePlayer player)
+        private List<PetController> GetPlayerPets(BasePlayer player)
         {
-            List<PetData> pets = new List<PetData>();
-            foreach (var pet in ActivePets.Values)
+            List<PetController> pets = new List<PetController>();
+            foreach (var pet in _activePets.Values)
             {
                 if (pet.Owner == player) pets.Add(pet);
             }
@@ -189,31 +263,32 @@ namespace Oxide.Plugins
         #region Chat Commands
 
         [ChatCommand("tame")]
-        private void CmdTame(BasePlayer player, string command, string[] args)
+        private void TameCommand(BasePlayer player, string command, string[] args)
         {
+            if (!permission.UserHasPermission(player.UserIDString, "petwolf.tame"))
+            {
+                player.ChatMessage("You don't have permission to use this command.");
+                return;
+            }
+
             var target = GetLookEntity(player, 15f);
             
             if (target != null && !target.IsDead() && target.ShortPrefabName.Contains("wolf2"))
             {
-                if (ActivePets.ContainsKey(target.net.ID))
+                if (target.TryGetComponent<PetController>(out var controller))
                 {
-                    ActivePets[target.net.ID].Cleanup();
-                    ActivePets.Remove(target.net.ID);
+                    UnityEngine.Object.Destroy(controller);
                     player.ChatMessage("You released the wolf back into the wild.");
                 }
                 else
                 {
-                    var navAgent = target.GetComponent<LimitedTurnNavAgent>();
-                    var petData = new PetData
-                    {
-                        Entity = target,
-                        Owner = player,
-                        NavAgent = navAgent,
-                        Command = PetCommand.Follow,
-                        FollowState = new State_Follow(target, navAgent),
-                        StayState = new State_Stay(navAgent)
-                    };
-                    ActivePets[target.net.ID] = petData;
+                    controller = target.gameObject.AddComponent<PetController>();
+                    controller.Owner = player;
+                    controller.FollowState = new State_Follow(target, controller.NavAgent);
+                    controller.StayState = new State_Stay(controller.NavAgent);
+                    controller.LeadState = new State_Lead(target, controller.NavAgent);
+
+                    _activePets[target.net.ID] = controller;
                     target.GetComponent<BlackboardComponent>()?.Clear();
                     
                     player.ChatMessage("You tamed a pet wolf! It will now follow you peacefully.");
@@ -226,7 +301,7 @@ namespace Oxide.Plugins
         }
 
         [ChatCommand("follow")]
-        private void CmdFollow(BasePlayer player, string command, string[] args)
+        private void FollowCommand(BasePlayer player, string command, string[] args)
         {
             var pets = GetPlayerPets(player);
             if (pets.Count > 0)
@@ -238,7 +313,7 @@ namespace Oxide.Plugins
         }
 
         [ChatCommand("stay")]
-        private void CmdStay(BasePlayer player, string command, string[] args)
+        private void StayCommand(BasePlayer player, string command, string[] args)
         {
             var pets = GetPlayerPets(player);
             if (pets.Count > 0)
@@ -250,46 +325,22 @@ namespace Oxide.Plugins
         }
 
         [ChatCommand("sleep")]
-        private void CmdSleep(BasePlayer player, string command, string[] args)
+        private void SleepCommand(BasePlayer player, string command, string[] args)
         {
             var pets = GetPlayerPets(player);
             if (pets.Count > 0)
             {
                 foreach (var pet in pets)
                 {
-                    pet.Command = PetCommand.Sleep;
-                    
-                    pet.SleepHealTimer?.Destroy();
-                    pet.SleepHealTimer = timer.Every(1800f, () =>
-                    {
-                        if (pet.Command == PetCommand.Sleep && pet.Entity != null && !pet.Entity.IsDead())
-                        {
-                            pet.Entity.Heal(5f);
-                        }
-                    });
+                    pet.SetSleep();
                 }
                 player.ChatMessage($"Commanded {pets.Count} wolf(s) to sleep.");
             }
             else player.ChatMessage("You don't have any pet wolves.");
         }
 
-        [ChatCommand("intimidated")]
-        private void CmdIntimidated(BasePlayer player, string command, string[] args)
-        {
-            var pets = GetPlayerPets(player);
-            if (pets.Count > 0)
-            {
-                foreach (var pet in pets)
-                {
-                    pet.Command = PetCommand.Intimidated;
-                }
-                player.ChatMessage($"Commanded {pets.Count} wolf(s) to act intimidated.");
-            }
-            else player.ChatMessage("You don't have any pet wolves.");
-        }
-
         [ChatCommand("attack")]
-        private void CmdAttack(BasePlayer player, string command, string[] args)
+        private void AttackCommand(BasePlayer player, string command, string[] args)
         {
             var pets = GetPlayerPets(player);
             if (pets.Count > 0)
@@ -300,25 +351,23 @@ namespace Oxide.Plugins
                     foreach (var pet in pets)
                     {
                         if (target == pet.Entity) continue; 
-                        
-                        pet.AttackTarget = target;
-                        pet.Command = PetCommand.Attack;
-
-                        pet.ActionTimer?.Destroy();
-                        pet.ActionTimer = timer.Once(10f, () =>
-                        {
-                            if (pet.Command == PetCommand.Attack)
-                            {
-                                pet.Command = PetCommand.Follow;
-                                pet.AttackTarget = null;
-                                if (player != null && player.IsConnected)
-                                    player.ChatMessage("Your wolf has finished its attack and is returning.");
-                            }
-                        });
+                        pet.SetAttackTarget(target);
                     }
                     player.ChatMessage($"Commanded {pets.Count} wolf(s) to attack {target.ShortPrefabName} for 10 seconds!");
                 }
                 else player.ChatMessage("Invalid attack target. Make sure you are looking directly at an entity.");
+            }
+            else player.ChatMessage("You don't have any pet wolves.");
+        }
+
+        [ChatCommand("lead")]
+        private void LeadCommand(BasePlayer player, string command, string[] args)
+        {
+            var pets = GetPlayerPets(player);
+            if (pets.Count > 0)
+            {
+                foreach (var pet in pets) pet.Command = PetCommand.Lead;
+                player.ChatMessage($"Commanded {pets.Count} wolf(s) to lead.");
             }
             else player.ChatMessage("You don't have any pet wolves.");
         }
@@ -347,16 +396,16 @@ namespace Oxide.Plugins
             {
                 if (_navAgent == null || _entity == null) return EFSMStateStatus.None;
 
-                if (!ActivePets.TryGetValue(_entity.net.ID, out PetData data) || data.Owner == null || data.Owner.IsDead())
+                if (!_entity.TryGetComponent<PetController>(out var controller) || controller.Owner == null || controller.Owner.IsDead())
                 {
                     return EFSMStateStatus.Failure; 
                 }
 
-                float distance = Vector3.Distance(_entity.transform.position, data.Owner.transform.position);
+                float distance = Vector3.Distance(_entity.transform.position, controller.Owner.transform.position);
 
                 if (distance > StopDistance)
                 {
-                    _navAgent.SetDestination(data.Owner.transform.position, true);
+                    _navAgent.SetDestination(controller.Owner.transform.position, true);
                     if (distance >= SprintDistance) _navAgent.SetSpeed(LimitedTurnNavAgent.Speeds.Sprint);
                     else if (distance >= RunDistance) _navAgent.SetSpeed(LimitedTurnNavAgent.Speeds.Run);
                     else _navAgent.SetSpeed(LimitedTurnNavAgent.Speeds.Walk);
@@ -390,6 +439,49 @@ namespace Oxide.Plugins
             }
         }
 
+        public class State_Lead : FSMStateBase
+        {
+            private BaseEntity _entity;
+            private LimitedTurnNavAgent _navAgent;
+
+            public float StopDistance = 2f;
+            public float AheadDistance = 5f;
+
+            public State_Lead(BaseEntity entity, LimitedTurnNavAgent navAgent)
+            {
+                Name = "Lead Owner";
+                _entity = entity;
+                _navAgent = navAgent;
+            }
+
+            public override EFSMStateStatus OnStateUpdate(float deltaTime)
+            {
+                if (_navAgent == null || _entity == null) return EFSMStateStatus.None;
+
+                if (!_entity.TryGetComponent<PetController>(out var controller) || controller.Owner == null || controller.Owner.IsDead())
+                {
+                    return EFSMStateStatus.Failure;
+                }
+
+                Vector3 forward = controller.Owner.eyes.HeadRay().direction;
+                forward.y = 0;
+                Vector3 targetPos = controller.Owner.transform.position + (forward.normalized * AheadDistance);
+                float distance = Vector3.Distance(_entity.transform.position, targetPos);
+
+                if (distance > StopDistance)
+                {
+                    _navAgent.SetDestination(targetPos, true);
+                    _navAgent.SetSpeed(LimitedTurnNavAgent.Speeds.Run);
+                }
+                else
+                {
+                    if (_navAgent.IsFollowingPath) _navAgent.ResetPath();
+                }
+
+                return EFSMStateStatus.None;
+            }
+        }
+
         #endregion
 
         #region Harmony Patches
@@ -399,11 +491,11 @@ namespace Oxide.Plugins
         {
             public static bool Prefix(SenseComponent __instance, ref BaseEntity target, ref bool __result)
             {
-                if (__instance.baseEntity != null && ActivePets.TryGetValue(__instance.baseEntity.net.ID, out var pet))
+                if (__instance.baseEntity != null && __instance.baseEntity.TryGetComponent<PetController>(out var controller))
                 {
-                    if (pet.Command == PetCommand.Attack && pet.AttackTarget != null && !pet.AttackTarget.IsDead())
+                    if (controller.Command == PetCommand.Attack && controller.AttackTarget != null && !controller.AttackTarget.IsDead())
                     {
-                        target = pet.AttackTarget;
+                        target = controller.AttackTarget;
                         __result = true;
                         return false; 
                     }
@@ -423,9 +515,9 @@ namespace Oxide.Plugins
             {
                 if (__instance != null && __instance.Owner != null)
                 {
-                    if (ActivePets.TryGetValue(__instance.Owner.net.ID, out var pet))
+                    if (__instance.Owner.TryGetComponent<PetController>(out var controller))
                     {
-                        if (pet.Command != PetCommand.Attack)
+                        if (controller.Command != PetCommand.Attack)
                         {
                             __result = EFSMStateStatus.Failure;
                             return false; 
@@ -442,7 +534,7 @@ namespace Oxide.Plugins
         {
             public static bool Prefix(State_ApproachFood __instance, FSMPayload payload, ref EFSMStateStatus __result)
             {
-                if (__instance != null && __instance.Owner != null && ActivePets.ContainsKey(__instance.Owner.net.ID))
+                if (__instance != null && __instance.Owner != null && __instance.Owner.GetComponent<PetController>() != null)
                 {
                     __result = EFSMStateStatus.Failure;
                     return false; 
@@ -457,7 +549,7 @@ namespace Oxide.Plugins
         {
             public static bool Prefix(State_EatFood __instance, FSMPayload payload, ref EFSMStateStatus __result)
             {
-                if (__instance != null && __instance.Owner != null && ActivePets.ContainsKey(__instance.Owner.net.ID))
+                if (__instance != null && __instance.Owner != null && __instance.Owner.GetComponent<PetController>() != null)
                 {
                     __result = EFSMStateStatus.Failure;
                     return false; 
@@ -471,7 +563,7 @@ namespace Oxide.Plugins
         {
             public static bool Prefix(Wolf2FSM __instance, HitInfo hitInfo)
             {
-                return !ActivePets.ContainsKey(__instance.baseEntity.net.ID); 
+                return __instance.baseEntity == null || __instance.baseEntity.GetComponent<PetController>() == null;
             }
         }
 
@@ -480,7 +572,27 @@ namespace Oxide.Plugins
         {
             public static bool Prefix(Wolf2FSM __instance, BaseEntity target)
             {
-                return !ActivePets.ContainsKey(__instance.baseEntity.net.ID);
+                return __instance.baseEntity == null || __instance.baseEntity.GetComponent<PetController>() == null;
+            }
+        }
+
+        [HarmonyPatch(typeof(Wolf2FSM), "SetState")]
+        public class Wolf2FSM_SetState_Patch
+        {
+            public static bool Prefix(Wolf2FSM __instance, FSMStateBase nextState)
+            {
+                if (__instance.baseEntity != null && __instance.baseEntity.TryGetComponent<PetController>(out var controller))
+                {
+                    if (controller.Command == PetCommand.Attack) return true;
+
+                    if (nextState == controller.FollowState || nextState == controller.StayState ||
+                        nextState == controller.LeadState ||
+                        nextState == __instance.sleep)
+                        return true;
+
+                    return false;
+                }
+                return true;
             }
         }
 
@@ -489,10 +601,9 @@ namespace Oxide.Plugins
         {
             public static void Postfix(Wolf2FSM __instance, HitInfo hitInfo)
             {
-                if (__instance.baseEntity != null && ActivePets.ContainsKey(__instance.baseEntity.net.ID))
+                if (__instance.baseEntity != null && __instance.baseEntity.TryGetComponent<PetController>(out var controller))
                 {
-                    ActivePets[__instance.baseEntity.net.ID].Cleanup();
-                    ActivePets.Remove(__instance.baseEntity.net.ID);
+                    UnityEngine.Object.Destroy(controller);
                 }
             }
         }
